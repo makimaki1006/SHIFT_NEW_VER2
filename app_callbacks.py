@@ -3133,7 +3133,24 @@ def register_callbacks(app, dash_app_ref=None):
     """
     global dash_app_module
     dash_app_module = dash_app_ref
+
+    register_upload_callbacks(app)
+    register_navigation_callbacks(app)
+    register_export_callbacks(app)
+    register_filter_callbacks(app)
+
+    # KPIチャート更新コールバックを登録
+    update_kpi_charts_callback(app)
     
+    # 残りのタブコンテンツコールバックを登録
+    register_tab_content_callbacks(app)
+    
+    # 追加のタブコールバックを登録（3476行以降のもの）
+    register_additional_tab_callbacks(app)
+
+
+
+def register_upload_callbacks(app):
     @app.callback(
         Output('main-content', 'children'),
         Output('main-content', 'style'),
@@ -3145,34 +3162,34 @@ def register_callbacks(app, dash_app_ref=None):
         """Complete callback for file upload processing with ZIP extraction and analysis"""
         print(f"[DEBUG] process_upload called: contents={contents is not None}, filename={filename}")
         log.info(f"[DEBUG] process_upload called: contents={contents is not None}, filename={filename}")
-        
+
         if contents is None:
             # Initial state: show upload area
             print("[DEBUG] Contents is None - showing upload area")
             log.info("[DEBUG] Contents is None - showing upload area")
             return [], {'display': 'none'}, {'display': 'block'}
-        
+
         log.info(f"[File received] {filename}")
-        
+
         try:
             # Decode file content
             content_type, content_string = contents.split(',')
             decoded = base64.b64decode(content_string)
-            
+
             # Process ZIP file
             if filename.endswith('.zip'):
                 log.info(f"Processing ZIP file: {filename}")
-                
+
                 # Create temporary directory for extraction
                 with tempfile.TemporaryDirectory() as temp_dir:
                     temp_path = Path(temp_dir)
-                    
+
                     # Extract ZIP file
                     with zipfile.ZipFile(io.BytesIO(decoded), 'r') as zip_ref:
                         zip_ref.extractall(temp_path)
                         extracted_files = list(temp_path.rglob('*'))
                         log.info(f"Extracted {len(extracted_files)} files")
-                    
+
                     # Look for analysis results
                     analysis_dirs = []
                     for item in temp_path.iterdir():
@@ -3181,42 +3198,34 @@ def register_callbacks(app, dash_app_ref=None):
                             parquet_files = list(item.rglob('*.parquet'))
                             if parquet_files:
                                 analysis_dirs.append(item)
-                    
+
                     if analysis_dirs:
                         # Set the first analysis directory as current scenario
                         selected_dir = analysis_dirs[0]
-                        
+
                         # Copy to a permanent temporary location
                         permanent_temp = Path(tempfile.mkdtemp(prefix="ShiftAnalysis_"))
                         TEMP_DIRS_TO_CLEANUP.append(permanent_temp)  # メモリリーク対策（修正2-1）
                         permanent_analysis_dir = permanent_temp / "analysis_results"
                         shutil.copytree(selected_dir, permanent_analysis_dir)
-                        
+
                         # Store scenario directory in global state (dash_app依存を除去)
                         global CURRENT_SCENARIO_DIR
                         CURRENT_SCENARIO_DIR = permanent_analysis_dir
                         log.info(f"Set analysis directory: {permanent_analysis_dir}")
-                        
-                        # UnifiedAnalysisManagerの登録は一時的にスキップ（dash_app依存除去）
-                        scenario_name = permanent_analysis_dir.name
-                        # 以下のUnifiedAnalysisManager関連のコードは、dash_app依存除去のためコメントアウト
-                        # 将来的に再実装が必要な場合は、独立したマネージャークラスを作成予定
-                        
+
                         # Create tab-based dashboard UI directly without dash_app dependencies
                         try:
-                            # 修正: dash_app依存を除去し、直接タブダッシュボードを作成
                             log.info(f"Creating tab-based dashboard for {permanent_analysis_dir}")
-                            
-                            # タブベースのダッシュボードUIを作成
+
                             success_message = create_tab_based_dashboard(filename, permanent_analysis_dir)
-                            
+
                             log.info("Tab-based dashboard created successfully")
-                            
+
                         except Exception as dashboard_error:
                             log.error(f"Dashboard generation error: {dashboard_error}")
                             import traceback
                             log.error(f"Full traceback:\n{traceback.format_exc()}")
-                            # Fallback to simple success message
                             success_message = html.Div([
                                 html.H3("Analysis Data Loaded!", style={'color': 'green'}),
                                 html.P(f"Filename: {filename}"),
@@ -3224,10 +3233,10 @@ def register_callbacks(app, dash_app_ref=None):
                                 html.P(f"Analysis directory: {permanent_analysis_dir.name}"),
                                 html.P(f"Error creating dashboard: {str(dashboard_error)}", style={'color': 'orange'})
                             ])
-                        
+
                         log.info("ZIP file processed successfully")
                         return [success_message], {'display': 'block'}, {'display': 'none'}
-                    
+
                     else:
                         # No analysis results found
                         error_message = html.Div([
@@ -3237,7 +3246,7 @@ def register_callbacks(app, dash_app_ref=None):
                             html.P("Please ensure you're uploading a valid analysis results file.")
                         ])
                         return [error_message], {'display': 'block'}, {'display': 'none'}
-            
+
             else:
                 # Non-ZIP file handling
                 error_message = html.Div([
@@ -3246,31 +3255,36 @@ def register_callbacks(app, dash_app_ref=None):
                     html.P("Please upload a ZIP file containing analysis results.")
                 ])
                 return [error_message], {'display': 'block'}, {'display': 'none'}
-            
+
         except Exception as e:
             log.error(f"Upload processing error: {e}")
             import traceback
             log.error(f"Traceback: {traceback.format_exc()}")
-            
+
             error_message = html.Div([
                 html.H3("Processing Error", style={'color': 'red'}),
                 html.P(f"Filename: {filename}"),
                 html.P(f"Error: {str(e)}"),
                 html.P("Please try uploading the file again or check the file format.")
             ])
-            
+
             return [error_message], {'display': 'block'}, {'display': 'none'}
+
+
+
+def register_navigation_callbacks(app):
+    """タブ表示制御と概要タブのコールバックを登録"""
 
     # Tab switching callback
     @app.callback(
-        [Output(f'{tab}-tab-container', 'style') for tab in ['overview', 'heatmap', 'shortage', 'fatigue', 'leave', 'fairness', 'cost', 'blueprint', 'fact-book', 'mind-reader', 'export']],
+        [Output(f"{tab}-tab-container", 'style') for tab in ['overview', 'heatmap', 'shortage', 'fatigue', 'leave', 'fairness',
+                                                                'cost', 'blueprint', 'fact-book', 'mind-reader', 'export']],
         Input('main-tabs', 'value')
     )
     def switch_tabs(active_tab):
         """Show/hide tab containers based on selected tab"""
         log.info(f"🔧 switch_tabs called with active_tab: {active_tab}")
-        
-        # タブvalueとコンテナIDのマッピング（動的データ対応）
+
         tab_value_to_container = {
             'overview': 'overview',
             'heatmap': 'heatmap',
@@ -3279,30 +3293,21 @@ def register_callbacks(app, dash_app_ref=None):
             'leave': 'leave',
             'fairness': 'fairness',
             'cost': 'cost',
-            'blueprint_analysis': 'blueprint',  # valueとコンテナIDの対応
+            'blueprint_analysis': 'blueprint',
             'fact_book': 'fact-book',
             'mind_reader': 'mind-reader',
             'export': 'export'
         }
-        
-        # 全コンテナのリスト（表示順序を維持）
-        container_ids = ['overview', 'heatmap', 'shortage', 'fatigue', 'leave', 
-                        'fairness', 'cost', 'blueprint', 'fact-book', 'mind-reader', 'export']
-        
-        # 現在のタブに対応するコンテナIDを取得
-        active_container = tab_value_to_container.get(active_tab, 'overview')
-        
-        # 各コンテナの表示/非表示スタイルを設定
-        styles = []
-        for container_id in container_ids:
-            if container_id == active_container:
-                styles.append({'display': 'block'})
-            else:
-                styles.append({'display': 'none'})
-        
-        return styles
 
-    # Overview tab content callback
+        container_ids = ['overview', 'heatmap', 'shortage', 'fatigue', 'leave',
+                         'fairness', 'cost', 'blueprint', 'fact-book', 'mind-reader', 'export']
+        active_container = tab_value_to_container.get(active_tab, 'overview')
+
+        return [
+            {'display': 'block'} if container_id == active_container else {'display': 'none'}
+            for container_id in container_ids
+        ]
+
     @app.callback(
         Output('overview-content', 'children'),
         Input('overview-tab-container', 'style'),
@@ -3312,49 +3317,42 @@ def register_callbacks(app, dash_app_ref=None):
         """Generate overview tab content with enhanced error handling"""
         if style.get('display') == 'none' or not scenario_dir_data:
             return []
-        
+
         try:
             scenario_dir = Path(scenario_dir_data)
-            
-            # Check if scenario directory exists
+
             if not scenario_dir.exists():
                 log.error(f"Scenario directory does not exist: {scenario_dir}")
                 return create_error_display("シナリオディレクトリが見つかりません", str(scenario_dir))
-            
-            # 修正: dash_app_module依存を除去し、簡易的なデータ収集に変更
+
             try:
-                # シンプルなデータ収集（dash_app依存なし）
                 basic_info = {
                     'scenario_dir': scenario_dir,
                     'scenario_name': scenario_dir.name if scenario_dir else 'Unknown',
                     'data_loaded': True
                 }
-                
+
                 overview_kpis = {
-                    'total_staff': 100,  # プレースホルダー値
-                    'total_hours': 1000,  # プレースホルダー値
+                    'total_staff': 100,
+                    'total_hours': 1000,
                     'data_error': False
                 }
-                
-                role_analysis = []  # 空のリスト（後で実装）
-                employment_analysis = []  # 空のリスト（後で実装）
-                
+
+                role_analysis = []
+                employment_analysis = []
+
                 return create_overview_content(basic_info, overview_kpis, role_analysis, employment_analysis)
-                
+
             except Exception as data_error:
                 log.error(f"Data collection error: {data_error}")
                 return create_error_display("データ収集エラー", str(data_error))
-                
+
         except Exception as e:
             log.error(f"Overview tab error: {e}")
             import traceback
             log.error(f"Traceback: {traceback.format_exc()}")
             return create_error_display("概要タブエラー", str(e))
 
-    # Shortage tab content callback
-    # Phase 3.2: 不足分析タブ詳細化 - Enhanced shortage analysis
-
-    # タブコンテンツ更新コールバック（修正: register_callbacks内に移動）
     @app.callback(
         Output('tab-content', 'children'),
         Input('main-tabs', 'value'),
@@ -3364,59 +3362,50 @@ def register_callbacks(app, dash_app_ref=None):
         """タブ切り替え時のコンテンツ更新"""
         if not scenario_dir:
             return html.Div("データがロードされていません", style={'color': 'gray', 'padding': '20px'})
-        
+
         scenario_path = Path(scenario_dir) if isinstance(scenario_dir, str) else scenario_dir
-        
-        # タブに応じたコンテンツを返す (全24タブ対応)
+
         tab_functions = {
-            # 基本分析グループ (3タブ)
             'overview': lambda: create_overview_tab(scenario_path),
             'heatmap': lambda: create_heatmap_tab(scenario_path),
             'shortage': lambda: create_shortage_tab(scenario_path),
-            
-            # 人事管理グループ (5タブ)
             'fatigue': lambda: create_fatigue_tab(scenario_path),
             'leave': lambda: create_leave_analysis_tab(scenario_path),
             'fairness': lambda: create_fairness_tab(scenario_path),
             'turnover': lambda: create_turnover_prediction_tab(scenario_path),
             'hr_risk': lambda: create_hr_risk_dashboard_tab(scenario_path),
-            
-            # 計画・最適化グループ (5タブ)
             'need_prediction': lambda: create_need_prediction_tab(scenario_path),
             'optimization': lambda: create_optimization_tab(scenario_path),
             'rank_deviation': lambda: create_rank_deviation_tab(scenario_path),
             'role_allocation': lambda: create_role_allocation_tab(scenario_path),
             'synergy_analysis': lambda: create_synergy_analysis_tab(scenario_path),
-            
-            # 高度分析グループ (5タブ)
             'blueprint_analysis': lambda: create_blueprint_analysis_tab(scenario_path),
             'fact_book': lambda: create_fact_book_tab(scenario_path),
             'mind_reader': lambda: create_mind_reader_tab(scenario_path),
             'mece_fact': lambda: create_mece_fact_analysis_tab(scenario_path),
             'compound_constraints': lambda: create_compound_constraints_tab(scenario_path),
-            
-            # レポート・配分グループ (4タブ)
             'cost': lambda: create_cost_analysis_tab(scenario_path),
             'ai_report': lambda: create_ai_report_tab(scenario_path),
             'shift_creation': lambda: create_shift_creation_tab(scenario_path),
             'timeaxis_shortage': lambda: create_timeaxis_shortage_tab(scenario_path),
-            
-            # ユーティリティ (2タブ)
             'export': lambda: create_export_tab(scenario_path),
             'settings': lambda: create_settings_tab(scenario_path)
         }
-        
+
         if active_tab in tab_functions:
             try:
                 return tab_functions[active_tab]()
             except Exception as e:
                 log.error(f"Error loading tab {active_tab}: {e}")
                 return html.Div(f"タブ読み込みエラー: {str(e)}", style={'color': 'red', 'padding': '20px'})
-        
+
         return html.Div(f"不明なタブ: {active_tab}", style={'color': 'orange', 'padding': '20px'})
 
-# Shortage分析用ヘルパー関数群
-    # Phase 7: エクスポート機能のコールバック
+
+
+def register_export_callbacks(app):
+    """エクスポート関連のコールバックを登録"""
+
     @app.callback(
         Output('export-feedback', 'children'),
         Output('download-datafile', 'data'),
@@ -3427,100 +3416,70 @@ def register_callbacks(app, dash_app_ref=None):
         prevent_initial_call=True
     )
     def handle_export_buttons(csv_clicks, graph_clicks, pdf_clicks, scenario_dir_data):
-        """エクスポートボタンのクリックを処理
-        
-        Returns:
-            tuple: (フィードバックメッセージ, ダウンロードデータ)
-        """
+        """エクスポートボタンのクリックを処理"""
         if not scenario_dir_data:
             return html.Div("エクスポートするデータがありません", style={'color': 'red'}), None
-        
-        # 明示的にdashをインポート（関数内で必要な場合）
+
         import dash
-        
         ctx = dash.callback_context
         if not ctx.triggered:
             return [], None
-        
+
         button_id = ctx.triggered[0]['prop_id'].split('.')[0]
         scenario_dir = get_scenario_dir(scenario_dir_data)
-        
-        # ⚠️ 致命的バグ修正: scenario_dirのNullチェック
+
         if scenario_dir is None:
             log.error(f"Failed to get scenario_dir from data: {scenario_dir_data}")
             return html.Div("データディレクトリが無効です", style={'color': 'red'}), None
-        
-        # scenario_dirが存在するか確認
+
         if not scenario_dir.exists():
             log.error(f"Scenario directory does not exist: {scenario_dir}")
             return html.Div(f"データディレクトリが存在しません: {scenario_dir}", style={'color': 'red'}), None
-        
+
         try:
             if button_id == 'export-csv-btn':
-                # CSV エクスポート
                 export_result = export_data_to_csv(scenario_dir)
                 if export_result and isinstance(export_result, dict):
-                    # キーの存在を確認してから使用
                     if 'data' in export_result and 'filename' in export_result:
-                        # 成功メッセージとダウンロードデータを返す
                         feedback = html.Div([
-                            html.P(f"✅ CSVファイルを準備しました: {export_result['filename']}", 
-                                   style={'color': 'green'}),
-                            html.P("ダウンロードが自動的に開始されます...", 
-                                   style={'color': '#666', 'fontSize': '12px'})
+                            html.P(f"✅ CSVファイルを準備しました: {export_result['filename']}", style={'color': 'green'}),
+                            html.P("ダウンロードが自動的に開始されます...", style={'color': '#666', 'fontSize': '12px'})
                         ])
-                        # dcc.Downloadコンポーネント用のデータ
-                        download_data = dcc.send_bytes(
-                            export_result['data'],
-                            export_result['filename']
-                        )
+                        download_data = dcc.send_bytes(export_result['data'], export_result['filename'])
                         return feedback, download_data
                     else:
                         log.error(f"Export result missing required keys: {export_result.keys()}")
                         return html.Div("エクスポート結果の形式が不正です", style={'color': 'red'}), None
                 else:
                     return html.Div("CSVエクスポートに失敗しました", style={'color': 'red'}), None
-                    
-            elif button_id == 'export-graph-btn':
-                # グラフエクスポート（実装予定）
-                return html.Div("📊 グラフエクスポート機能は準備中です", 
-                               style={'color': 'orange'}), None
-                
-            elif button_id == 'export-pdf-btn':
-                # PDFレポート生成
+
+            if button_id == 'export-graph-btn':
+                return html.Div("📊 グラフエクスポート機能は準備中です", style={'color': 'orange'}), None
+
+            if button_id == 'export-pdf-btn':
                 pdf_result = generate_pdf_report(scenario_dir)
                 if pdf_result and isinstance(pdf_result, dict):
-                    # キーの存在を確認してから使用
                     if 'data' in pdf_result and 'filename' in pdf_result:
-                        # 成功メッセージとダウンロードデータを返す
                         feedback = html.Div([
-                            html.P(f"✅ PDFレポートを準備しました: {pdf_result['filename']}", 
-                                   style={'color': 'green'}),
-                            html.P("ダウンロードが自動的に開始されます...", 
-                                   style={'color': '#666', 'fontSize': '12px'})
+                            html.P(f"✅ PDFレポートを準備しました: {pdf_result['filename']}", style={'color': 'green'}),
+                            html.P("ダウンロードが自動的に開始されます...", style={'color': '#666', 'fontSize': '12px'})
                         ])
-                        # dcc.Downloadコンポーネント用のデータ
-                        download_data = dcc.send_bytes(
-                            pdf_result['data'],
-                            pdf_result['filename']
-                        )
+                        download_data = dcc.send_bytes(pdf_result['data'], pdf_result['filename'])
                         return feedback, download_data
                     else:
                         log.error(f"PDF result missing required keys: {pdf_result.keys()}")
                         return html.Div("PDFレポート形式が不正です", style={'color': 'red'}), None
                 else:
                     return html.Div("PDFレポート生成に失敗しました", style={'color': 'red'}), None
-                    
+
         except Exception as e:
             log.error(f"Export error: {e}")
             import traceback
             log.error(f"Traceback: {traceback.format_exc()}")
-            return html.Div(f"エクスポート中にエラーが発生しました: {str(e)}", 
-                           style={'color': 'red'}), None
-        
+            return html.Div(f"エクスポート中にエラーが発生しました: {str(e)}", style={'color': 'red'}), None
+
         return [], None
 
-    # Export tab content callback
     @app.callback(
         Output('export-content', 'children'),
         Input('export-tab-container', 'style'),
@@ -3530,12 +3489,9 @@ def register_callbacks(app, dash_app_ref=None):
         """エクスポートタブのコンテンツを生成"""
         if style.get('display') == 'none' or not scenario_dir_data:
             return []
-        
+
         try:
-            # エクスポートセクションを生成
             export_section = create_export_section()
-            
-            # 利用可能なデータ情報を追加
             scenario_dir = get_scenario_dir(scenario_dir_data)
             data_info = html.Div([
                 html.H4("📂 利用可能なデータ", style={'marginTop': '20px', 'color': '#2c3e50'}),
@@ -3546,25 +3502,24 @@ def register_callbacks(app, dash_app_ref=None):
                     html.Li("✅ コスト分析データ (cost_*.parquet)"),
                     html.Li("✅ 休暇分析データ (leave_*.parquet)")
                 ], style={'color': '#555'})
-            ], style={
-                'backgroundColor': '#f8f9fa',
-                'padding': '15px',
-                'borderRadius': '8px',
-                'marginTop': '20px'
-            })
-            
+            ], style={'backgroundColor': '#f8f9fa', 'padding': '15px', 'borderRadius': '8px', 'marginTop': '20px'})
+
             return html.Div([
                 html.H2("📥 データエクスポート", style={'textAlign': 'center', 'color': '#2c3e50'}),
                 html.Hr(),
                 export_section,
                 data_info
             ])
-            
+
         except Exception as e:
             log.error(f"Export tab error: {e}")
             return create_error_display("エクスポートタブエラー", str(e))
 
-    # Phase 8: 動的フィルタリングコールバック
+
+
+def register_filter_callbacks(app):
+    """共通フィルタの適用とリセットに関するコールバックを登録"""
+
     @app.callback(
         Output('filter-status', 'children'),
         Output('date-range-filter', 'start_date'),
@@ -3584,15 +3539,13 @@ def register_callbacks(app, dash_app_ref=None):
         ctx = dash.callback_context
         if not ctx.triggered:
             return [], None, None, 'all', 'all'
-        
+
         button_id = ctx.triggered[0]['prop_id'].split('.')[0]
-        
+
         if button_id == 'reset-filter-btn':
-            # フィルタをリセット
             return html.Div("フィルタをリセットしました", style={'color': 'blue'}), None, None, 'all', 'all'
-        
-        elif button_id == 'apply-filter-btn':
-            # フィルタ適用状態を表示
+
+        if button_id == 'apply-filter-btn':
             status_items = []
             if start_date and end_date:
                 status_items.append(f"期間: {start_date} ～ {end_date}")
@@ -3606,18 +3559,17 @@ def register_callbacks(app, dash_app_ref=None):
                     status_items.append(f"雇用形態: {', '.join(employments)}")
                 else:
                     status_items.append(f"雇用形態: {employments}")
-            
+
             if status_items:
                 return html.Div([
                     html.P("✅ フィルタ適用中:", style={'fontWeight': 'bold', 'color': 'green'}),
                     html.Ul([html.Li(item) for item in status_items])
                 ]), start_date, end_date, roles, employments
-            else:
-                return html.Div("フィルタが設定されていません", style={'color': 'orange'}), start_date, end_date, roles, employments
-        
+
+            return html.Div("フィルタが設定されていません", style={'color': 'orange'}), start_date, end_date, roles, employments
+
         return [], start_date, end_date, roles, employments
 
-    # フィルタ適用後のデータ更新コールバック（各タブ用）
     @app.callback(
         Output('filtered-data-store', 'data'),
         Input('apply-filter-btn', 'n_clicks'),
@@ -3632,22 +3584,13 @@ def register_callbacks(app, dash_app_ref=None):
         """フィルタ条件をストアに保存"""
         if not scenario_dir_data:
             return {}
-        
+
         return {
             'date_range': [start_date, end_date] if start_date and end_date else None,
             'roles': roles if roles != 'all' else None,
             'employments': employments if employments != 'all' else None,
             'timestamp': pd.Timestamp.now().isoformat()
         }
-    
-    # KPIチャート更新コールバックを登録
-    update_kpi_charts_callback(app)
-    
-    # 残りのタブコンテンツコールバックを登録
-    register_tab_content_callbacks(app)
-    
-    # 追加のタブコールバックを登録（3476行以降のもの）
-    register_additional_tab_callbacks(app)
 
 def register_tab_content_callbacks(app):
     """
